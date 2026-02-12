@@ -10,8 +10,9 @@ client/node_modules/
 # Build output
 client/dist/
 
-# Data (keep folder, don't commit CSV with real data)
+# Data (keep folder, don't commit CSV or app state)
 data/*.csv
+data/app-state.json
 !data/.gitkeep
 
 # OS and editor

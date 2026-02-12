@@ -3,11 +3,17 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { parse } from 'csv-parse/sync';
 import { createStripeCheckout } from './stripe.js';
 import { createPayPalOrder, capturePayPalOrder } from './paypal.js';
-import { loadInvoices } from './invoices.js';
+import { loadInvoices, saveInvoicesToSupabase } from './invoices.js';
+import { isSupabaseConfigured } from './supabase.js';
+import { getState, appendEmailLog, getNotes, addNote, getAutomations, addAutomation, updateAutomation, deleteAutomation, getElevenLabsConfigured, getElevenLabsKey, setElevenLabsKey } from './store.js';
+import { sendInvoiceEmail } from './email.js';
+import { runDueAutomations, setInvoicesRef, startAutomationScheduler } from './automations.js';
+import { startOutboundCall } from './elevenlabs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -19,14 +25,26 @@ app.use(express.json());
 // Optional: serve built frontend
 app.use(express.static(path.join(__dirname, '../client/dist')));
 
-// Load invoices from CSV (from project root or Downloads)
+// Invoices: load from Supabase if configured, else CSV; keep in memory for fast reads
 let invoices = [];
-loadInvoices()
-  .then((data) => {
-    invoices = data;
-    console.log(`Loaded ${invoices.length} invoices`);
-  })
-  .catch((err) => console.warn('No CSV loaded yet:', err.message));
+
+async function refreshInvoices() {
+  const data = await loadInvoices();
+  invoices = data;
+  setInvoicesRef(invoices);
+  return data;
+}
+
+refreshInvoices()
+  .then((data) => console.log(`Loaded ${data.length} invoices (source: ${isSupabaseConfigured() ? 'Supabase' : 'CSV'})`))
+  .catch((err) => console.warn('Invoice load failed:', err.message));
+
+startAutomationScheduler();
+
+// API: data source (for UI to show "Connected to Supabase")
+app.get('/api/invoices/source', (req, res) => {
+  res.json({ source: isSupabaseConfigured() ? 'supabase' : 'csv' });
+});
 
 // API: list invoices
 app.get('/api/invoices', (req, res) => {
@@ -41,8 +59,8 @@ app.get('/api/invoices/:id', (req, res) => {
   res.json(invoice);
 });
 
-// API: upload/reload CSV (send CSV text in body)
-app.post('/api/invoices/upload', express.text({ type: ['text/csv', 'text/plain'], limit: '5mb' }), (req, res) => {
+// API: upload CSV – when Supabase is connected, upserts into DB and reloads; otherwise in-memory only
+app.post('/api/invoices/upload', express.text({ type: ['text/csv', 'text/plain'], limit: '5mb' }), async (req, res) => {
   try {
     const raw = req.body;
     if (raw === undefined || raw === null) {
@@ -56,8 +74,16 @@ app.post('/api/invoices/upload', express.text({ type: ['text/csv', 'text/plain']
       relax_quotes: true,
       trim: true,
     });
-    invoices = records.map((r) => ({ ...r, id: r.id || invoices.length + 1 }));
-    res.json({ count: invoices.length, message: 'Invoices updated' });
+    const withId = records.map((r, i) => ({ ...r, id: r.id || String(i + 1) }));
+
+    if (isSupabaseConfigured()) {
+      await saveInvoicesToSupabase(withId);
+      const data = await refreshInvoices();
+      return res.json({ count: data.length, message: 'Invoices synced to Supabase and reloaded', source: 'supabase' });
+    }
+    invoices = withId;
+    setInvoicesRef(invoices);
+    res.json({ count: invoices.length, message: 'Invoices updated (in-memory only)', source: 'csv' });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -119,6 +145,132 @@ app.post('/api/capture-paypal-order', async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'PayPal capture error' });
+  }
+});
+
+// Payment demand letter: optional PDF sent with each invoice
+const paymentDemandUrl = process.env.PAYMENT_DEMAND_LETTER_URL;
+const paymentDemandPath = path.join(__dirname, 'assets', 'payment-demand.pdf');
+
+app.get('/api/payment-demand-letter/available', (req, res) => {
+  const available = !!(paymentDemandUrl || existsSync(paymentDemandPath));
+  res.json({ available });
+});
+
+app.get('/api/payment-demand-letter', (req, res) => {
+  if (paymentDemandUrl) {
+    return res.redirect(302, paymentDemandUrl);
+  }
+  if (existsSync(paymentDemandPath)) {
+    return res.sendFile(paymentDemandPath, {
+      headers: { 'Content-Disposition': 'attachment; filename="Payment_Demand_Letter.pdf"' },
+    });
+  }
+  res.status(404).json({ error: 'Payment demand letter not configured. Set PAYMENT_DEMAND_LETTER_URL or add server/assets/payment-demand.pdf' });
+});
+
+// Dashboard: amounts owed and activity
+app.get('/api/dashboard', (req, res) => {
+  const unpaid = invoices.filter((inv) => {
+    const status = (inv.payment_status || '').toLowerCase();
+    return !status.includes('paid');
+  });
+  let totalOwed = 0;
+  const byCustomer = {};
+  unpaid.forEach((inv) => {
+    const amt = parseFloat(String(inv.cust_freight_charges || 0).replace(/[^0-9.]/g, '')) || 0;
+    totalOwed += amt;
+    const key = inv.invoiced_customer_internal_use || inv.receiver_name || inv.customer_updated_text || inv.email_field || 'Unknown';
+    if (!byCustomer[key]) byCustomer[key] = { total: 0, count: 0 };
+    byCustomer[key].total += amt;
+    byCustomer[key].count += 1;
+  });
+  const state = getState();
+  const activity = (state.emailsLog || []).slice(0, 50);
+  res.json({ totalOwed, byCustomer: Object.entries(byCustomer).map(([name, v]) => ({ name, ...v })), unpaidCount: unpaid.length, activity });
+});
+
+// Activity (email log)
+app.get('/api/activity', (req, res) => {
+  const state = getState();
+  res.json(state.emailsLog || []);
+});
+
+// Notes per invoice
+app.get('/api/notes/:invoiceId', async (req, res) => {
+  const notes = await getNotes(req.params.invoiceId);
+  res.json(notes);
+});
+
+app.post('/api/notes/:invoiceId', async (req, res) => {
+  const { body, fromClient } = req.body;
+  const note = await addNote(req.params.invoiceId, { body: body || req.body, fromClient: !!fromClient });
+  res.json(note);
+});
+
+// Send invoice email
+app.post('/api/send-invoice-email', async (req, res) => {
+  const { invoiceId } = req.body;
+  const invoice = invoices.find((inv) => String(inv.id) === String(invoiceId));
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  const appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  try {
+    const result = await sendInvoiceEmail(invoice, appUrl);
+    await appendEmailLog({ invoiceId: invoice.id, to: result.to, subject: result.subject });
+    res.json({ success: true, to: result.to });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed to send email' });
+  }
+});
+
+// Automations
+app.get('/api/automations', (req, res) => {
+  res.json(getAutomations());
+});
+
+app.post('/api/automations', async (req, res) => {
+  const auto = await addAutomation(req.body);
+  res.json(auto);
+});
+
+app.patch('/api/automations/:id', async (req, res) => {
+  const updated = await updateAutomation(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'Not found' });
+  res.json(updated);
+});
+
+app.delete('/api/automations/:id', async (req, res) => {
+  await deleteAutomation(req.params.id);
+  res.json({ ok: true });
+});
+
+// Settings: ElevenLabs API key (never expose the key)
+app.get('/api/settings/elevenlabs', (req, res) => {
+  res.json({ configured: getElevenLabsConfigured() });
+});
+
+app.post('/api/settings/elevenlabs', async (req, res) => {
+  const apiKey = req.body?.apiKey != null ? String(req.body.apiKey) : '';
+  await setElevenLabsKey(apiKey);
+  res.json({ ok: true });
+});
+
+// ElevenLabs: start AI outbound call to customer
+app.post('/api/elevenlabs-call', async (req, res) => {
+  const { invoiceId, toNumber } = req.body;
+  const invoice = invoices.find((inv) => String(inv.id) === String(invoiceId));
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  const apiKey = getElevenLabsKey() || process.env.ELEVENLABS_API_KEY;
+  try {
+    const result = await startOutboundCall({
+      apiKey,
+      toNumber: toNumber || invoice.phone || invoice.customer_phone,
+    });
+    res.json({ success: true, ...result });
+  } catch (e) {
+    console.error(e);
+    res.status(400).json({ error: e.message || 'Failed to start call' });
   }
 });
 

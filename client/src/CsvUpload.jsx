@@ -27,7 +27,7 @@ export function CsvUpload({ onUploadSuccess }) {
         .then((res) => res.json())
         .then((data) => {
           if (data.error) throw new Error(data.error);
-          setMessage({ type: 'success', text: `Loaded ${data.count} invoices.` });
+          setMessage({ type: 'success', text: data.message || `Loaded ${data.count} invoices.` });
           onUploadSuccess?.();
           if (inputRef.current) inputRef.current.value = '';
         })

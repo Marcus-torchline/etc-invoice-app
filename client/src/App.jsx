@@ -3,22 +3,34 @@ import { InvoiceList } from './InvoiceList';
 import { InvoiceDetail } from './InvoiceDetail';
 import { InvoicePrint } from './InvoicePrint';
 import { CsvUpload } from './CsvUpload';
+import { Dashboard } from './Dashboard';
+import { Automations } from './Automations';
+import { Settings } from './Settings';
 
 const API = '/api';
 
+const VIEWS = { dashboard: 'Dashboard', invoices: 'Invoices', automations: 'Automations', settings: 'Settings' };
+
 export default function App() {
+  const [view, setView] = useState('invoices');
   const [invoices, setInvoices] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [printInvoice, setPrintInvoice] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [dataSource, setDataSource] = useState(null);
 
   const loadInvoices = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`${API}/invoices`)
-      .then((res) => res.ok ? res.json() : Promise.reject(new Error('Failed to load')))
-      .then(setInvoices)
+    Promise.all([
+        fetch(`${API}/invoices`).then((res) => (res.ok ? res.json() : Promise.reject(new Error('Failed to load')))),
+        fetch(`${API}/invoices/source`).then((res) => (res.ok ? res.json() : { source: 'csv' })),
+      ])
+      .then(([invData, src]) => {
+        setInvoices(invData);
+        setDataSource(src.source || 'csv');
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
@@ -66,7 +78,17 @@ export default function App() {
             <h1>Essential Trading Invoices</h1>
             <p className="subtitle">View, generate, and pay freight invoices</p>
           </div>
+          <nav className="main-nav">
+            {Object.entries(VIEWS).map(([key, label]) => (
+              <button key={key} type="button" className={`nav-btn ${view === key ? 'active' : ''}`} onClick={() => setView(key)}>
+                {label}
+              </button>
+            ))}
+          </nav>
           <CsvUpload onUploadSuccess={loadInvoices} />
+          {dataSource === 'supabase' && (
+            <span className="data-source-badge" title="Invoices loaded from Supabase">Supabase</span>
+          )}
         </div>
       </header>
 
@@ -82,7 +104,14 @@ export default function App() {
         </div>
       )}
 
-      {!loading && !error && (
+      {!loading && !error && view === 'dashboard' && (
+        <Dashboard invoices={invoices} onSelectInvoice={(id) => { setSelectedId(id); setView('invoices'); }} />
+      )}
+      {!loading && !error && view === 'automations' && (
+        <Automations invoices={invoices} onSelectInvoice={(id) => { setSelectedId(id); setView('invoices'); }} />
+      )}
+      {!loading && !error && view === 'settings' && <Settings />}
+      {!loading && !error && view === 'invoices' && (
         <>
           <InvoiceList
             invoices={invoices}
