@@ -29,6 +29,7 @@ export function Dashboard({ invoices, onSelectInvoice }) {
   return (
     <div className="dashboard">
       <h2>Dashboard</h2>
+      <p className="dashboard-intro">Summary of unpaid invoices. Only invoices with payment status <strong>Paid</strong> are excluded from the total.</p>
 
       <div className="dashboard-cards">
         <div className="card card-owed">
@@ -41,8 +42,9 @@ export function Dashboard({ invoices, onSelectInvoice }) {
       {data.byCustomer && data.byCustomer.length > 0 && (
         <section className="dashboard-section">
           <h3>Amount owed by customer</h3>
+          <p className="muted small">Breakdown of unpaid totals per customer. Use Invoices to open individual invoices.</p>
           <div className="table-wrap">
-            <table className="invoice-table">
+            <table className="invoice-table dashboard-table">
               <thead>
                 <tr>
                   <th>Customer</th>

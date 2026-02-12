@@ -177,11 +177,11 @@ app.get('/api/payment-demand-letter', (req, res) => {
   res.status(404).json({ error: 'Payment demand letter not configured. Set PAYMENT_DEMAND_LETTER_URL or add server/assets/payment-demand.pdf' });
 });
 
-// Dashboard: amounts owed and activity
+// Dashboard: amounts owed and activity (unpaid = status is not exactly "Paid")
 app.get('/api/dashboard', (req, res) => {
   const unpaid = invoices.filter((inv) => {
-    const status = (inv.payment_status || '').toLowerCase();
-    return !status.includes('paid');
+    const status = (inv.payment_status || '').toLowerCase().trim();
+    return status !== 'paid';
   });
   let totalOwed = 0;
   const byCustomer = {};
