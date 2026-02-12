@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Env and secrets
+.env
+.env.local
+.env.*.local
+
+# Build output
+client/dist/
+
+# Data (keep folder, don't commit CSV with real data)
+data/*.csv
+!data/.gitkeep
+
+# OS and editor
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
