@@ -59,7 +59,7 @@ app.get('/api/invoices/:id', (req, res) => {
   res.json(invoice);
 });
 
-// API: upload CSV – when Supabase is connected, upserts into DB and reloads; otherwise in-memory only
+// API: upload CSV – try Supabase if connected; on any DB error fall back to in-memory so upload always works
 app.post('/api/invoices/upload', express.text({ type: ['text/csv', 'text/plain'], limit: '5mb' }), async (req, res) => {
   try {
     const raw = req.body;
@@ -77,9 +77,17 @@ app.post('/api/invoices/upload', express.text({ type: ['text/csv', 'text/plain']
     const withId = records.map((r, i) => ({ ...r, id: r.id || String(i + 1) }));
 
     if (isSupabaseConfigured()) {
-      await saveInvoicesToSupabase(withId);
-      const data = await refreshInvoices();
-      return res.json({ count: data.length, message: 'Invoices synced to Supabase and reloaded', source: 'supabase' });
+      try {
+        await saveInvoicesToSupabase(withId);
+        const data = await refreshInvoices();
+        return res.json({ count: data.length, message: 'Invoices synced to Supabase and reloaded', source: 'supabase' });
+      } catch (dbErr) {
+        // Column mismatch or other DB error: use CSV in memory only, don't block upload
+        console.warn('Supabase upload failed, using CSV in memory:', dbErr.message);
+        invoices = withId;
+        setInvoicesRef(invoices);
+        return res.json({ count: invoices.length, message: `Loaded ${invoices.length} invoices (Supabase sync skipped: ${dbErr.message})`, source: 'csv' });
+      }
     }
     invoices = withId;
     setInvoicesRef(invoices);
