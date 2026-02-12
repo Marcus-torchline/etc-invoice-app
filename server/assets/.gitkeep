@@ -1,0 +1,1 @@
+# Place payment-demand.pdf here (export from Payment_Demand_Template), or set PAYMENT_DEMAND_LETTER_URL in .env to a Google Drive / public PDF link.
